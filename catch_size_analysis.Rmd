@@ -1,0 +1,314 @@
+---
+title: "Analysis of catch sizes for european tuna seiners and maldivian pole-and-line vessels"
+output: html_document
+author: "Augustin Lafond"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We load the packages
+
+```{r, message = F}
+source("https://www.dropbox.com/s/lzdnoe69iex1le1/load_packages.R?dl=1") #Load packages
+
+load_packages("lubridate",
+              "tidyverse",
+              "readxl",
+              "openxlsx",
+              "janitor", 
+              "grid", 
+              "RCurl",
+              "kableExtra",
+              "jpeg")
+
+```
+
+# In this section, we compare the size of tuna caught by European purse seiners vs. Maldivian pole and liners
+
+Data on tuna size caught in the Indian ocean can be downloaded at :
+<https://iotc.org/data/datasets>
+
+```{r}
+
+file_names <- paste0("data/catch size/", list.files ("data/catch size") %>%
+  as_tibble () %>%
+  filter (str_detect(value, "IOTC-DATASETS") == TRUE) %>%
+  pull (value))
+
+data_size <- lapply(file_names, read_xlsx, 2)
+
+for (i in 1:length(data_size)) {
+  data_size [[i]] <- data_size [[i]] %>%
+    clean_names ()
+}
+
+data_size <- do.call("rbind", data_size)
+
+```
+
+```{r}
+
+data_size_plot <- data_size %>%
+  filter (fleet_code %in% c("EUESP", "EUFRA", "MDV") & year > 2014 & !gear_code == "TROL") %>%
+  mutate(gear_code = case_when (gear_code %in% c("BBOF", "BB") ~ "Canne (Maldives)",
+                                gear_code %in% c("HLOF", "HAND") ~ "Ligne à main (Maldives)",
+                                gear_code == "LL" ~ "Palangre (Maldives)",
+                                gear_code == "PS" ~ "Senne (UE)"),
+         species_code = case_when (species_code == "BET" ~ "Thon Obèse",
+                                    species_code == "SKJ" ~ "Thon Listao (ou Bonite)", 
+                                    species_code == "YFT" ~ "Thon Albacore"),
+         species_code = factor(species_code, levels = c("Thon Obèse", "Thon Listao (ou Bonite)", "Thon Albacore"))) %>%
+  group_by(gear_code, species_code, school_type_code, first_class_low, size_interval) %>%
+  summarise_at(vars(matches(c("c0|c1"))), ~ sum(.)) %>%
+  ungroup () %>%
+  pivot_longer (cols = 6:ncol(.), names_to = "size_bin", values_to = "fish_nb") %>%
+  with_groups (c("gear_code", "species_code", "school_type_code"), mutate, fish_freq = fish_nb/sum(fish_nb)) %>%
+  mutate (size_min = first_class_low + (as.numeric(str_extract(size_bin, "[0-9]+"))-1) * size_interval,
+          size_max = first_class_low + as.numeric(str_extract(size_bin, "[0-9]+")) * size_interval,
+          size_mean = (size_min + size_max)/2,
+          size_juvenile = case_when (species_code == "Thon Obèse" ~ 112.5,
+                                     species_code == "Thon Listao (ou Bonite)" ~ 46,
+                                     species_code == "Thon Albacore" ~ 103.3)) # Length at maturity come from https://www.fishbase.se/summary/thunnus-albacares.html
+
+```
+
+Estimating the absolute volume of tuna caught by the maldivian baitboat and european purse seiners per year
+
+```{r}
+
+catch_iotc <- readRDS ("data/iotc_spatial.rds") %>%
+  filter (((country == "Spain" & gear == "Purse seine") | (country == "France" & gear == "Purse seine") | (country == "Maldives" & grepl("Baitboat", gear))) & year > 2014 & species %in% c("Yellowfin tuna", "Bigeye tuna", "Skipjack tuna")) %>%
+  mutate(country = ifelse(country %in% c("France", "Spain"), "EU", country)) %>%
+  with_groups (c("country", "year", "species"), summarise, catch = sum(catch, na.rm = T)) %>%
+  with_groups(c("country", "species"), summarise, catch = mean(catch))
+
+```
+
+Size frequency distribution of the catches (relative) for Maldivian fisheries and European purse seine fishery without distinction of the type of set (FAD vs. FS)
+
+```{r}
+
+annotation <- data.frame (species_code = factor (c("Thon Obèse", "Thon Listao (ou Bonite)", "Thon Albacore")), text = c(paste0("EU = ", catch_iotc %>% filter (species == "Bigeye tuna" & country == "EU") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t\nMaldives = ", catch_iotc %>% filter (species == "Bigeye tuna" & country == "Maldives") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t"),
+  paste0("EU = ", catch_iotc %>% filter (species == "Skipjack tuna" & country == "EU") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t\nMaldives = ", catch_iotc %>% filter (species == "Skipjack tuna" & country == "Maldives") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t"),
+  paste0("EU = ", catch_iotc %>% filter (species == "Yellowfin tuna" & country == "EU") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t\nMaldives = ", catch_iotc %>% filter (species == "Yellowfin tuna" & country == "Maldives") %>% mutate(catch = format(round(catch,0), big.mark =" ")) %>% pull (catch), " t")), x1 = c(180, 180, 180), y1 = c(7, 7, 7))
+
+
+img1 = readJPEG("input/tuna images/big_eye.jpg")
+img2 = readJPEG("input/tuna images/skipjack.jpg")
+img3 = readJPEG("input/tuna images/yellowfin.jpg")
+
+annotation_custom2 <- 
+function (grob, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf, data){ layer(data = data, stat = StatIdentity, position = PositionIdentity, 
+        geom = ggplot2:::GeomCustomAnn,
+        inherit.aes = TRUE, params = list(grob = grob, 
+                                          xmin = xmin, xmax = xmax, 
+                                          ymin = ymin, ymax = ymax))}
+
+a1 = annotation_custom2(rasterGrob(img1, interpolate=TRUE), xmin=160, xmax=200, ymin=13, ymax=25, data_size_plot %>% filter(species_code == "Thon Obèse") %>% slice(1))
+a2 = annotation_custom2(rasterGrob(img2, interpolate=TRUE), xmin=160, xmax=200, ymin=12, ymax=24, data_size_plot %>% filter(species_code == "Thon Listao (ou Bonite)") %>% slice(1))
+a3 = annotation_custom2(rasterGrob(img3, interpolate=TRUE),xmin=160, xmax=200, ymin=13, ymax=25, data_size_plot %>% filter(species_code == "Thon Albacore") %>% slice(1))
+
+
+p <- ggplot(data_size_plot %>%
+         with_groups (c("gear_code", "species_code", "size_mean", "size_juvenile"), summarise, fish_nb = sum(fish_nb)) %>%
+         with_groups (c("gear_code", "species_code"), mutate, fish_freq = fish_nb*100/sum(fish_nb)), aes(x = size_mean, y = fish_freq)) +
+  geom_rect(aes(xmin=0, xmax=size_juvenile, ymin=0, ymax=25), fill = "grey90") +
+  geom_area(aes(fill = gear_code), position = "identity", alpha = 0.8) +
+  geom_text (data = annotation, aes(x = x1, y = y1, label = text)) +
+  geom_text (aes(x = 10, y = 20, label = "Juvéniles"), color = "grey30", fontface='bold') +
+  facet_wrap(~species_code, ncol = 1) + 
+  theme_classic () +
+  scale_fill_viridis_d (option = "viridis") +
+  labs (y = "Fréquence de distribution (en %)", x = "Longueur des thons pêchés (en cm)", fill = "Pêcherie") +
+  scale_x_continuous(limits = c(0,200), expand = c(0,0)) +
+  theme(legend.position="bottom")
+  
+p + a1 + a2 + a3
+
+ggsave(file = "Output/Figure/Size frequency distribution.pdf", width = 26, height = 18, unit = "cm", limitsize = FALSE)
+
+```
+
+## Size frequency distribution of the catches (absolute) for Maldivian pole and line
+
+What we observe is that the length frequency distribution of tuna caught by maldivian baitboat under anchored FAD and on free school is similar. 
+
+```{r}
+
+ggplot(data_size_plot %>% 
+         filter (gear_code %in% c("Canne (Maldives)", "Senne (UE)") & !school_type_code %in% c("UNCL", "FD")) %>% 
+         mutate (school_type_code = ifelse(school_type_code %in% c("LS", "LA"), "FAD", school_type_code)) %>%
+         with_groups(c("gear_code", "species_code", "school_type_code", "size_mean"), summarise, fish_nb = sum(fish_nb, na.rm = T)) %>%
+         mutate (fishery = paste0(gear_code, "_", school_type_code)) %>%
+         filter (gear_code == "Canne (Maldives)"), aes(x = size_mean, y = fish_nb, fill = fishery)) +
+    geom_area(position = "identity", alpha = 0.8) +
+    facet_wrap(~species_code, ncol = 1) + 
+    theme_classic () +
+    scale_fill_viridis_d (option = "viridis") +
+    labs (y = "Frequency distribution", x = "Fish length (cm)", fill = "Fishery") +
+    scale_x_continuous(limits = c(0,200), expand = c(0,0))
+
+```
+
+## Size frequency distribution of the catches (relative) for Maldivian pole and line
+
+```{r}
+
+ggplot(data_size_plot %>% 
+         filter (gear_code %in% c("Canne (Maldives)", "Senne (UE)") & !school_type_code %in% c("UNCL", "FD")) %>% 
+         mutate (school_type_code = ifelse(school_type_code %in% c("LS", "LA"), "FAD", school_type_code)) %>%
+         with_groups(c("gear_code", "species_code", "school_type_code", "size_mean"), summarise, fish_nb = sum(fish_nb, na.rm = T)) %>%
+         mutate (fishery = paste0(gear_code, "_", school_type_code)) %>%
+         filter (gear_code == "Canne (Maldives)") %>%
+         with_groups (c("species_code", "school_type_code"), mutate, frequency = fish_nb*100/sum(fish_nb)), aes(x = size_mean, y = frequency, fill = fishery)) +
+    geom_area(position = "identity", alpha = 0.8) +
+    facet_wrap(~species_code, ncol = 1) + 
+    theme_classic () +
+    scale_fill_viridis_d (option = "viridis") +
+    labs (y = "Frequency distribution", x = "Fish length (cm)", fill = "Fishery") +
+    scale_x_continuous(limits = c(0,200), expand = c(0,0))
+
+```
+
+## Size frequency distribution of the catches (absolute) for European purse seine
+
+The absolute number of tuna caught under free swimming school by EU purse seiners is almost null. 
+
+```{r}
+
+ggplot(data_size_plot %>% 
+           filter (gear_code %in% c("Canne (Maldives)", "Senne (UE)") & !school_type_code %in% c("UNCL", "FD")) %>% 
+           mutate (school_type_code = ifelse(school_type_code %in% c("LS", "LA"), "FAD", school_type_code)) %>%
+           with_groups(c("gear_code", "species_code", "school_type_code", "size_mean"), summarise, fish_nb = sum(fish_nb, na.rm = T)) %>%
+           mutate (fishery = paste0(gear_code, "_", school_type_code)) %>%
+           filter (gear_code == "Senne (UE)"), aes(x = size_mean, y = fish_nb, fill = fishery)) +
+    geom_area(position = "identity", alpha = 0.8) +
+    facet_wrap(~species_code, ncol = 1) + 
+    theme_classic () +
+    scale_fill_viridis_d (option = "viridis") +
+    labs (y = "Frequency distribution", x = "Fish length (cm)", fill = "Fishery") +
+    scale_x_continuous(limits = c(0,200), expand = c(0,0))
+
+```
+
+## Size frequency distribution of the catches (relative) for European purse seine
+
+However, we clearly see that tuna caught under free swimming schools are much larger than those caught under dFAD, especially for Yellowfin and Big eye tunas.
+
+```{r}
+
+ggplot(data_size_plot %>% 
+         filter (gear_code %in% c("Canne (Maldives)", "Senne (UE)") & !school_type_code %in% c("UNCL", "FD")) %>% 
+         mutate (school_type_code = ifelse(school_type_code %in% c("LS", "LA"), "FAD", school_type_code)) %>%
+         with_groups(c("gear_code", "species_code", "school_type_code", "size_mean"), summarise, fish_nb = sum(fish_nb, na.rm = T)) %>%
+         mutate (fishery = paste0(gear_code, "_", school_type_code)) %>%
+         filter (gear_code == "Senne (UE)") %>%
+         with_groups (c("species_code", "school_type_code"), mutate, frequency = fish_nb*100/sum(fish_nb)), aes(x = size_mean, y = frequency, fill = fishery)) +
+    geom_area(position = "identity", alpha = 0.8) +
+    facet_wrap(~species_code, ncol = 1) + 
+    theme_classic () +
+    scale_fill_viridis_d (option = "viridis") +
+    labs (y = "Frequency distribution", x = "Fish length (cm)", fill = "Fishery") +
+    scale_x_continuous(limits = c(0,200), expand = c(0,0))
+
+```
+
+Percent of juvenile according to fishery 
+
+```{r}
+
+juvenile_perc <- data_size_plot %>%
+  filter (gear_code %in% c("Canne (Maldives)", "Senne (UE)")) %>% 
+  mutate(school_type = case_when (school_type_code == "FD" ~ "Free school dolphin Associated",
+                                  school_type_code == "FS" ~ "Free-swimming school",
+                                  school_type_code == "LA" ~ "Associated school anchored-FAD",
+                                  school_type_code == "LS" ~ "Drifting Log or FAD-associated",
+                                  school_type_code == "UNCL" ~ "Unknown")) %>%
+  with_groups(c("gear_code", "species_code", "school_type", "size_mean"), summarise, fish_nb = sum(fish_nb, na.rm = T)) %>%
+    mutate (juvenile = case_when(species_code == "Thon Obèse" & size_mean < 112.5 ~"TRUE",
+                                 species_code == "Thon Listao (ou Bonite)" & size_mean < 46 ~ "TRUE",
+                                 species_code == "Thon Albacore" & size_mean < 103.3 ~"TRUE"),
+            juvenile = ifelse(is.na(juvenile), FALSE, juvenile),
+            size_tot = fish_nb * size_mean) %>%
+  with_groups(c("gear_code", "species_code", "school_type", "juvenile"), summarise, fish_nb = sum(fish_nb), size_tot = sum(size_tot)) %>%
+  with_groups(c("gear_code", "species_code", "school_type"), mutate, fish_perc = round(fish_nb*100/sum(fish_nb), 1), size_mean = round(sum(size_tot)/sum(fish_nb),1))
+
+#Let's create a table 
+juvenile_perc %>%
+  kable () %>%
+  kable_paper(full_width = T) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "responsive", "hover")) %>%
+  row_spec(0, bold = TRUE)
+  
+# Let's save the data for other use (in particular we use it to estimate the percent of juvenile caught by eu purse seiners and maldivian pole and liners)
+
+write.xlsx(juvenile_perc, "output/Data/juvenile_perc.xlsx")
+
+```
+
+Few statistics for the report "From heaven to hell"
+
+FADs used by European also threaten population renewal, as they are responsible for the capture of large numbers of juvenile yellowfin and bigeye tuna, two species considered overfished in the Indian Ocean. A few figures to understand the scale of the disaster:
+
+* `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Albacore" & school_type == "Drifting Log or FAD-associated" & juvenile == TRUE) %>% pull (fish_perc)`% of yellowfin tuna caught on FADs are juveniles (average size: `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Albacore" & school_type == "Drifting Log or FAD-associated") %>% slice(1) %>% pull (size_mean)` cm), compared with `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Albacore" & school_type == "Free-swimming school" & juvenile == TRUE) %>% pull (fish_perc)`% on free schools (`r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Albacore" & school_type == "Free-swimming school") %>% slice(1) %>% pull (size_mean)` cm).
+
+* For bigeye tuna, the situation is even more alarming: `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Obèse" & school_type == "Drifting Log or FAD-associated" & juvenile == TRUE) %>% pull (fish_perc)`% of catches on FADs are juveniles (average size: `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Obèse" & school_type == "Drifting Log or FAD-associated") %>% slice(1) %>% pull (size_mean)` cm), compared with `r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Obèse" & school_type == "Free-swimming school" & juvenile == TRUE) %>% pull (fish_perc)`% on free schools (`r juvenile_perc %>% filter (gear_code == "Senne (UE)" & species_code == "Thon Obèse" & school_type == "Free-swimming school") %>% slice(1) %>% pull (size_mean)` cm).
+
+Contrary to what might be expected, the figures for these two species are hardly any better for Maldivian pole-and-line vessels, whose catches are made up entirely of juveniles, whether on anchored FADs or on free schools. Nevertheless, as the volumes caught by artisanal fishermen are 5 times lower (`r catch_iotc %>% filter (country == "Maldives" & species == "Yellowfin tuna") %>% mutate(catch = format(round(catch,0), big.mark =",")) %>% pull (catch)` t vs. `r catch_iotc %>% filter (country == "EU" & species == "Yellowfin tuna") %>% mutate(catch = format(round(catch,0), big.mark =",")) %>% pull (catch)` t) for yellowfin tuna and 57 times lower (`r catch_iotc %>% filter (country == "Maldives" & species == "Bigeye tuna") %>% mutate(catch = format(round(catch,0), big.mark =",")) %>% pull (catch)` t vs. `r catch_iotc %>% filter (country == "EU" & species == "Bigeye tuna") %>% mutate(catch = format(round(catch,0), big.mark =",")) %>% pull (catch)` t) for bigeye tuna, they have a much smaller impact on these species. The presence of yellowfin tuna juveniles in baitboat catches is linked to their aggregation behavior with schools of skipjack (or bonito) tuna; the main species targeted by baitboats, with nearly `r catch_iotc %>% filter (country == "Maldives" & species == "Skipjack tuna") %>% mutate(catch = format(round(catch,0), big.mark =",")) %>% pull (catch)`t caught and a low proportion of juveniles (`r juvenile_perc %>% filter(gear_code == "Canne (Maldives)" & species_code == "Thon Listao (ou Bonite)") %>% with_groups(juvenile, summarise, fish_nb = sum(fish_nb)) %>% mutate(juv_perc = round((fish_nb*100)/sum(fish_nb),0)) %>% filter(juvenile == TRUE) %>% pull (juv_perc)`%).
+
+
+Table showing the percentage of maldivian catch by school type 
+
+Maldivian pole and liners make 57% of their catches on anchored FADs and 36% on free schools, over the 2015-2021 period
+
+```{r}
+
+data_size %>%
+    filter (fleet_code == "MDV" & year > 2014 & gear_code %in% c("BBOF", "BB")) %>%
+    with_groups(school_type_code, summarise, kg_fish = sum(kg_fish)) %>%
+    mutate(kg_fish_perc = round(kg_fish*100/sum(kg_fish),0)) %>%
+    mutate(school_type = case_when (school_type_code == "FD" ~ "Free school dolphin Associated",
+                                    school_type_code == "FS" ~ "Free-swimming school",
+                                    school_type_code == "LA" ~ "Associated school anchored-FAD",
+                                    school_type_code == "LS" ~ "Drifting Log or FAD-associated",
+                                    school_type_code == "UNCL" ~ "Unknown")) %>%
+  select(-kg_fish, -school_type_code) %>%
+  rename(catch_perc = kg_fish_perc) %>%
+  relocate(school_type, .before = catch_perc) %>%
+  kable () %>%
+  kable_paper(full_width = T) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "responsive", "hover")) %>%
+  row_spec(0, bold = TRUE)
+
+```
+
+In the Indian ocean, EU purse seiners make 85% of their catch on dFAD, over the 2015-2020 period
+
+```{r}
+
+readRDS ("data/iotc_spatial.rds") %>%
+    filter (((country == "Spain" & gear == "Purse seine") | (country == "France" & gear == "Purse seine")) & year > 2014 & species %in% c("Yellowfin tuna", "Bigeye tuna", "Skipjack tuna")) %>%
+    mutate(country = ifelse(country %in% c("France", "Spain"), "EU", country)) %>%
+    with_groups(fad_associated, summarise, catch = sum(catch, na.rm = T)) %>%
+    mutate(catch_perc = round(catch*100/sum(catch),1))
+
+```
+
+Calculation of the percentage of juvenile tuna caught by the tuna purse seiners and the maldivian pole and liners (taking into account yellowfinf, bigeye, and skipjack tuna species)
+
+```{r}
+
+test <- data_size_plot %>%
+    filter (gear_code %in% c("Senne (UE)", "Canne (Maldives)")) %>%
+    mutate (juvenile = case_when(species_code == "Thon Obèse" & size_mean < 112.5 ~"TRUE",
+                                 species_code == "Thon Listao (ou Bonite)" & size_mean < 46 ~ "TRUE",
+                                 species_code == "Thon Albacore" & size_mean < 103.3 ~"TRUE"),
+            juvenile = ifelse(is.na(juvenile), FALSE, juvenile)) %>%
+    with_groups(c("gear_code", "juvenile"), summarise, fish_nb = sum(fish_nb)) %>%
+    with_groups (gear_code, mutate, fish_perc = (fish_nb*100/sum(fish_nb)))
+  
+```
+

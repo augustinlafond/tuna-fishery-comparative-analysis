@@ -1,0 +1,342 @@
+---
+title: "Estimating the amount of subsidies perceived by the french and spanish tropical tuna purse seiners under the european structural funds over the 1994-2020 period"
+output: html_document
+author: "Augustin Lafond"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+We load the packages
+
+```{r, message = F}
+source("https://www.dropbox.com/s/lzdnoe69iex1le1/load_packages.R?dl=1") #Load packages
+
+load_packages("lubridate",
+              "tidyverse",
+              "readxl",
+              "openxlsx",
+              "janitor",
+              "priceR", 
+              "kableExtra", 
+              "cowplot")
+
+```
+
+We load the list of authorizations
+
+```{r}
+
+list_of_authorisations <- read.xlsx("https://www.dropbox.com/s/i04wmdn0criseov/List%20of%20authorizations.xlsx?dl=1") %>%
+  mutate_at (.vars = c("date_start", "date_end"), ~as.Date (., origin = "1899-12-30"))
+
+```
+
+Here is the list of the french and spanish tropical tuna purse seiners having a license in the context of fishing access agreements, since 2008. We will use this list to filter our subsidies database to keep only subsidies related to these vessels. 
+
+```{r}
+
+authorized_vessels <- list_of_authorisations %>%
+    filter(country %in% c("Spain", "France") & vessel_category == "Purse seiners") %>%
+    distinct (vessel_name, cfr)
+
+```
+
+```{r}
+
+authorized_vessels %>%
+  kable () %>%
+  kable_paper(full_width = T) %>%
+  kable_styling(bootstrap_options = c("striped", "condensed", "responsive", "hover")) %>%
+  row_spec(0, bold = TRUE)
+
+```
+
+We load the French subsidies database related to European sructural and investment funds dedicated to fisheries. 
+
+This database was produced by BLOOM after gathering the lists of beneficiaries from the administration,i.e., the European Commission before 2007, and the Direction des pêches maritimes et de l'aquaculture (DPMA) since 2007. The lists of beneficiaries were then cleaned, homogenized, and enriched with other data (e.g., the EU fleet register database) to produce this database. 
+The database covers the period 1994-2020, i.e., the four structural and investment funds dedicated to fisheries :
+
+* The first iteration of the Financial Instrument For Fisheries Guidance (FIFG1) from 1994-2000
+* The second iteration of the Financial Instrument For Fisheries Guidance (FIFG2) from 2000-2006
+* The European Fisheries Fund (EFF) from 2007-2013
+* The European Maritime and Fisheries Fund (EMFF) from 2014-2020
+
+```{r}
+
+fr_subsidies <- read.xlsx ("data/subsidies/fra_subsidies_database_1994_2020_from_bloom.xlsx") %>%
+  filter (cfr %in% c(authorized_vessels %>% pull(cfr))) %>%
+  mutate(date_payment = as.Date(date_payment, origin = "1899-12-30")) %>%
+  select (country, fund, project_number, beneficiary, project_name, measure, sub_measure = action, subsidy_national, subsidy_europe, subsidy_total, subsidy_national_2020, subsidy_europe_2020, subsidy_total_2020, date_payment, cfr, vessel_name, length, tonnage, main_power, main_gear) %>%
+   mutate(date_payment = year(date_payment))
+
+```
+
+We load the EU database produced by the Fishsubsidy.org project which covers the 1994-2006 period. Hence, it does not cover the EFF and EMFF. 
+
+```{r}
+
+esp_subsidies <- read_xls("data/subsidies/eu_subsidies_database_1994_2006_from_fishsubsidies.xls") %>%
+  clean_names () %>%
+  filter (cfr %in% c(authorized_vessels %>% pull(cfr)) & country_name == "SPAIN")  %>%
+  select (country = country_name, project_number = project_no, measure = scheme_name, subsidy_national = member_state, subsidy_europe = fifg, subsidy_total = total_subsidy, date_payment = year, cfr, vessel_name, length = overall_length, tonnage, main_power) %>%
+  mutate(fund = ifelse(date_payment < 2000, "FIFG1", "FIFG2")) %>%
+  mutate(subsidy_national_2020 = adjust_for_inflation(subsidy_national, from_date = date_payment, country = "EU", to_date = 2020), # amount are corrected for inflation
+         subsidy_europe_2020 = adjust_for_inflation(subsidy_europe, from_date = date_payment, country = "EU", to_date = 2020),
+         subsidy_total_2020 = adjust_for_inflation(subsidy_total, from_date = date_payment, country = "EU", to_date = 2020),
+         country = "Spain")
+
+```
+
+We load and clean the spanish EMFF list of beneficiaries. 
+
+NB : We have the EFF list of beneficiaries, but the CFR are not indicated, so we don't know how much subsidies were perceived by the spanish tuna purse seiners during the 2007-2013 period. 
+
+The downloaded file was actualized on July 28, 2022 and was published on a pdf format that we converted to a csv file using the software Tabula. The pdf file can be found on the following webpage : 
+<https://www.mapa.gob.es/es/pesca/temas/fondos-europeos/femp/>
+
+```{r}
+
+emff_esp <- read.csv("data/subsidies/esp_emff_data.csv") %>%
+  filter (X == "") %>%
+  distinct () %>%
+  select (-X) %>%
+  select (beneficiary = "NOMBRE.DE.LOS.BENEFICIARIOS",
+         cfr = "CODIGO.CFR",
+         project_name = "DATOS.OPERACIÓN",
+         project_description = "GASTOS.TOTALES.SUBVENCIONABLES",
+         project_start = X.1,
+         project_end = X.2,
+         subsidy_total = X.8,
+         subsidy_eu = X.9,
+         zip_code = X.4,
+         eu_priority = X.6,
+         eu_sub_measure = X.7,
+         day_subsidized = X.3) %>%
+  filter (grepl("/", project_start)) %>%
+  mutate (cfr = ifelse(cfr == "ESP000000000", "", cfr),
+          cfr = ifelse(cfr == "", NA, cfr)) %>%
+  mutate_at (c("project_start", "project_end"), ~as.Date(., format = "%d/%m/%Y")) %>%
+  mutate_at (c("project_name", "project_description", "eu_priority", "eu_sub_measure"), ~str_replace_all(., "[\r\n]" , " ")) %>%
+  mutate_at (c("subsidy_total", "subsidy_eu", "day_subsidized"), ~as.numeric(str_replace (str_remove (., "\\."), ",", "\\."))) %>%
+  mutate (eu_priority = case_when(eu_priority == "1. Fomento de pesca sostenible  desde el punto de vista medioambiental" ~ "Fisheries",
+                          eu_priority == "2. Fomento de acuicultura sostenible desde el punto de vista medioambiental" ~ "Aquaculture",
+                          eu_priority == "3. Fomento de aplicación de la PPC" ~ "Common Fisheries Policy",
+                          eu_priority == "4. Aumento de empleo y la cohesión territorial" ~ "Community-led local development strategies",
+                          eu_priority == "5. Fomento de comercialización y transformación" ~ "Marketing and processing",
+                          eu_priority == "6. Fomento de aplicación de la PMI" ~ "Integrated Maritime Policy", 
+                          eu_priority == "7. Asistencia técnica" ~ "Technical assistance")) %>%
+  mutate(country = "Spain") %>%
+  relocate (country, .before = beneficiary)
+
+```
+
+We load the EU fleet register 
+
+```{r}
+
+fleet <- readRDS ("data/clean_fleet_register_20230626.rds")
+
+```
+
+We match vessel-related operations with the EU fleet register to get vessel characteristics
+
+```{r}
+
+cfr_match <- emff_esp %>% 
+  filter (!is.na(cfr)) %>%
+  mutate (id = 1:n()) %>%
+  left_join(fleet,
+            by = "cfr") %>%
+  rowwise() %>%
+  mutate(ndays = pmax(pmin(project_end, event_end_date) - pmax(project_start, event_start_date) + 1,0)) %>% #Calculate interval overlap and set to 0 if no overlap
+  with_groups(id, filter, ndays == max(ndays)) %>% #Keep most overlapping records
+  distinct() 
+  
+# Case where there is no overlapping periods between our dataset and the fleet register 
+
+if (cfr_match %>% filter (ndays == 0) %>% nrow () > 0) { 
+  
+cfr_match <- cfr_match %>% 
+  filter (ndays > 0) %>%
+  bind_rows(cfr_match %>%
+              filter(ndays == 0) %>% 
+              mutate (ndays = abs(pmin(project_end, event_end_date) - pmax(project_start, event_start_date) + 1)) %>%
+              with_groups(id, filter, ndays == min(ndays)))
+}
+
+# Case where there is two or more exact same overlapping for a given CFR, e.g., one record of our dataset corresponding to one CFR has the same number of overlapping days with two or more records in the fleet register. This is a problem because it duplicates the record of our dataset. 
+
+if (cfr_match %>% with_groups(id, mutate, count = n()) %>% filter (count > 1) %>% nrow () > 0) {
+
+  cfr_match <- cfr_match %>% 
+    with_groups(id, mutate, count = n()) %>% 
+    filter (count == 1) %>% 
+    bind_rows(cfr_match %>% 
+    with_groups(id, mutate, count = n()) %>% 
+    filter (count > 1) %>% 
+    with_groups(id, slice, 1))
+}
+
+cfr_match <- cfr_match %>%
+  select (-c("ndays", "event_start_date", "event_end_date"))
+
+```
+
+
+```{r}
+
+emff_esp  <- emff_esp %>% 
+  filter (is.na(cfr)) %>%
+  bind_rows (cfr_match)
+
+rm(cfr_match)
+
+```
+
+We filter the data to keep only data related to spanish tropical tuna purse seiners
+
+```{r}
+
+emff_esp <- emff_esp %>%
+  mutate(country = "Spain", 
+         fund = "EMFF") %>%
+  filter (cfr %in% c(authorized_vessels %>% pull(cfr))) %>% # we keep only operation related to tuna purse seiners
+  select (country, fund, beneficiary, project_name, sub_measure = eu_sub_measure, subsidy_europe = subsidy_eu, subsidy_total, date_payment = project_end, cfr, vessel_name, length, tonnage = tonnage_gt, main_power = power, main_gear = gear) %>%
+  mutate(date_payment = year(date_payment)) %>%
+  mutate(subsidy_europe_2020 = adjust_for_inflation(subsidy_europe, from_date = date_payment, country = "EU", to_date = 2020),
+         subsidy_total_2020 = adjust_for_inflation(subsidy_total, from_date = date_payment, country = "EU", to_date = 2020))
+  
+```
+
+We merge the data from the three sources.
+
+```{r}
+
+tuna_purse_seiners_subsidies <- fr_subsidies %>% 
+  mutate (main_power = as.numeric(main_power)) %>%
+  bind_rows(esp_subsidies) %>%
+  bind_rows(emff_esp) 
+
+```
+
+We save the subsidies data related to european tuna purse seiners.
+
+```{r}
+
+fig_table_subsidies <- tuna_purse_seiners_subsidies %>%
+             mutate(measure = ifelse(is.na(measure), sub_measure, measure)) %>%
+             mutate(measure = case_when (measure %in% c("Construction of new vessels", "Construction of new vessel") ~ "Construction",
+                                         measure %in% c("Modernisation of existing vessels", "Modernisation of vessel", "Investments on board fishing vessels and selectivity", "1.4.4. Salud y seguridad (Art.32 (+ Art.44.1.b))", "1.5.3. Eficiencia y mitigación del cambio climatico. Inversiones a Bordo (Art.41.1.a (+ Art.44.1.d))") ~ "Modernisation",
+                                         measure == "Temporary cessation of fishing activities" ~ "Temporary cessation")) %>%
+             select (country, measure, subsidy_total_2020, vessel_name, length) %>%
+             with_groups(c("country", "measure", "vessel_name", "length"), summarise, subsidy = sum(subsidy_total_2020)) %>%
+             arrange(country, measure, desc(subsidy)) %>%
+  mutate(length = ifelse(is.na(length), 52.3, length),
+         length = round(length, 0),
+         country = ifelse(country == "Spain", "Espagne", country),
+         vessel_name = ifelse(vessel_name == "JUAN RAMON EGA—A", "JUAN RAMON EGANA", vessel_name),
+         measure = ifelse(measure == "Temporary cessation", "Arrêt temporaire", measure)) %>% 
+  filter(!is.na(measure))
+
+
+
+write.xlsx(fig_table_subsidies %>% 
+             mutate(subsidy = format(round(subsidy,0), big.mark = " "),
+                    vessel_name = ifelse(vessel_name == "JUAN RAMON EGA—A", "JUAN RAMON EGANA", vessel_name), 
+                                         vessel = paste0(vessel_name, " (", length, " m)")) %>%
+             select(-vessel_name, -length) %>%
+             rename("Pays" = "country") %>%
+             rename("Mesure" = "measure") %>%
+             rename("Navire" = "vessel") %>%
+             rename("Subventions (million d'EUR 2000)" = "subsidy") %>%
+             relocate(Navire, .after = Mesure), "output/Data/thoniers subventionnés par les fonds européens.xlsx")
+
+```
+
+List of French and Spanish tuna seiners that have received subsidies from the European structural and investment funds for construction and modernization since 1994.
+
+```{r, fig.fullwidth=TRUE}
+
+p1 <- ggplot(fig_table_subsidies %>%
+               filter (measure %in% c("Construction", "Modernisation") & country == "Espagne") %>%
+               mutate(length = ifelse(vessel_name == "MAR DE SERGIO", 84, length)) %>%
+               with_groups(c("country", "measure", "vessel_name", "length"), summarise, subsidy = sum(subsidy)) %>%
+               arrange(desc(subsidy)) %>%
+               mutate(x = 1:n()) %>%
+               mutate(subsidy = ifelse(measure == "Construction", -subsidy/10^6, subsidy/10^6),
+                      y = ifelse(subsidy<0, -0.03, 0.03),
+                      vessel_name = ifelse(vessel_name == "JUAN RAMON EGA—A", "JUAN RAMON EGANA", vessel_name), 
+                      vessel = paste0(vessel_name, " (", length, " m)"),
+                      hj = ifelse (subsidy<0, 1.1,-0.1),
+                      color = ifelse (subsidy<0, "#D2395A", "orange")), aes(x=x, y = subsidy, label=vessel)) +
+  geom_segment(aes(x=x, xend=x, y=y, yend=subsidy), color="#646566") +
+  geom_point(aes(color=color), size=6, alpha = 0.7) + 
+  geom_text(aes(hjust=hj, vjust=0.5), color = "#646566", size = 2) +
+  coord_flip() +
+  scale_x_reverse(expand = c(0,0.5)) +
+  scale_y_continuous(position = "right", breaks = seq(-7,3,1), label = c("7", "6", "5", "4", "3", "2", "1", "0", "1", "2", "3"), limits = c(-8.2,4.1)) +
+  scale_color_manual(labels = c("Construction de navire", "Modernisation de navire"), values = c("#D2395A", "orange")) +
+  theme_bw () +
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.title = element_blank(),
+        axis.line = element_blank(),
+        axis.line.x = element_line(color="#646566"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0.5),
+        legend.position = c(0.2, 0.2),
+        legend.box.background = element_rect(colour = "black")) +
+  geom_segment(aes(x=1, xend=39, y=0, yend=0), color="#646566") +
+  labs (color = "Type de mesure subventionnée\n(en million d'EUR)", title = paste0("Espagne\n(Montant total perçu = ", fig_table_subsidies %>% filter (country == "Espagne") %>% summarise (subsidy = round(sum(subsidy/10^6),1)) %>% pull (subsidy), " millions d'EUR)"))
+
+
+
+p2 <- ggplot(fig_table_subsidies %>%
+               filter (measure %in% c("Construction", "Modernisation") & country == "France") %>%
+               arrange(desc(subsidy)) %>%
+               mutate(x = 1:n()) %>%
+               mutate(subsidy = ifelse(measure == "Construction", -subsidy/10^6, subsidy/10^6),
+                      y = ifelse(subsidy<0, -0.03, 0.03),
+                      vessel = paste0(vessel_name, " (", length, " m)"),
+                      hj = ifelse (subsidy<0, 1.12,-0.12),
+                      color = ifelse (subsidy<0, "#D2395A", "orange")), aes(x=x, y = subsidy, label=vessel)) +
+  geom_segment(aes(x=x, xend=x, y=y, yend=subsidy), color="#646566") +
+  geom_point(aes(color=color), size=6, alpha = 0.7) + 
+  geom_text(aes(hjust=hj, vjust=0.5), color = "#646566", size = 2) +
+  coord_flip() +
+  scale_x_reverse(expand = c(0,0.5)) +
+  scale_y_continuous(position = "right", breaks = seq(-3,2, 1), label = c("3", "2", "1", "0", "1", "2"), limits = c(-4,3.2)) +
+  scale_color_manual(labels = c("Construction de navire", "Modernisation de navire"), values = c("#D2395A", "orange")) +
+  theme_bw () +
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.title = element_blank(),
+        axis.line = element_blank(),
+        axis.line.x = element_line(color="#646566"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  geom_segment(aes(x=1, xend=17, y=0, yend=0), color="#646566") +
+  guides(color="none") +
+  labs (title = paste0("France\n(Montant total perçu = ", fig_table_subsidies %>% filter (country == "France") %>% summarise (subsidy = round(sum(subsidy/10^6),1)) %>% pull (subsidy), " millions d'EUR)"))
+
+
+plot_grid(p1, p2, ncol = 2, align = "h", rel_widths = c(6.2,3.8))
+
+ggsave(file = "output/Figure/European_funds.png", width = 29.7, height = 18, unit = "cm", limitsize = FALSE, bg = "#FFFFFF")
+
+```
+
+Statistics for the report "Hidden costs" :
+
+Analysis of this data reveals that between 1994 and 2020, French tuna seiners received almost `r tuna_purse_seiners_subsidies %>% filter (country == "France") %>% summarise (subsidy_total = format(sum(subsidy_total_2020), big.mar = ",")) %>% pull (subsidy_total)` euros to build and modernize their fleet. Two industrial vessels, for example, were built with taxpayers' money: the AVEL VAD (67 m) and GLENAN (84 m) received `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Construction of new vessels" & vessel_name == "AVEL VAD") %>% mutate(subsidy_total_2020 = format(subsidy_total_2020, big.mark = ",")) %>% pull (subsidy_total_2020)` and `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Construction of new vessels" & vessel_name == "GLENAN") %>% mutate(subsidy_total_2020 = format(subsidy_total_2020, big.mark = ",")) %>% pull (subsidy_total_2020)` euros respectively in `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Construction of new vessels" & vessel_name == "AVEL VAD") %>% pull(date_payment)` and `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Construction of new vessels" & vessel_name == "GLENAN") %>% pull(date_payment)`; subsidies for the construction of new vessels were banned in 2004. Over the entire period, `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure %in% c("Investments on board fishing vessels and selectivity", "Modernisation of existing vessels")) %>% summarise (subsidy_total = format(sum(subsidy_total_2020), big.mar = ",")) %>% pull (subsidy_total)` euros were allocated to modernize `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure %in% c("Investments on board fishing vessels and selectivity", "Modernisation of existing vessels")) %>% distinct (vessel_name) %>% nrow ()` French tropical tuna vessels. More recently, the SAPMER vessel Dolomieu (89 m), based on Réunion, received `r tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Temporary cessation of fishing activities") %>% mutate(subsidy_total_2020 = format(round(subsidy_total_2020,0), big.mark =",")) %>% pull(subsidy_total_2020)` euros as part of a temporary cessation during the COVID-19 crisis, corresponding `r round((tuna_purse_seiners_subsidies %>% filter (country == "France" & measure == "Temporary cessation of fishing activities") %>% pull(subsidy_total_2020)*100)/read.xlsx ("data/subsidies/fra_subsidies_database_1994_2020_from_bloom.xlsx") %>% filter (fund == "EMFF" & region == "La Réunion" & !is.na(cfr)) %>% summarise (subsidy = sum(subsidy_total_2020)) %>% pull (subsidy),1)` % of all FEAMP subsidies received by Réunion vessels.
+
+Spanish tuna seiners are not to be outdone, having received the staggering sum of `r tuna_purse_seiners_subsidies %>% filter (country == "Spain") %>% summarise (subsidy_total = format(sum(subsidy_total_2020), big.mar = ",")) %>% pull (subsidy_total)` euros between 1994-2006 and 2014-2020 under cover of European funds. These subsidies have enabled the construction of `r tuna_purse_seiners_subsidies %>% filter (country == "Spain" & measure == "Construction of new vessel") %>% nrow ()` giant purse seiners at a cost of `r tuna_purse_seiners_subsidies %>% filter (country == "Spain" & measure == "Construction of new vessel") %>% summarise (subsidy = sum(subsidy_total_2020)) %>% mutate(subsidy = format(subsidy, big.mark = ",")) %>% pull (subsidy)` euros, including `r tuna_purse_seiners_subsidies %>% filter (country == "Spain" & measure == "Construction of new vessel" & length > 100) %>% nrow ()` vessels over 100 meters long. The record goes to the ALBATUN DOS, the largest tuna seiner in the European fleet (116 meters), which alone received `r tuna_purse_seiners_subsidies %>% filter (country == "Spain" & measure == "Construction of new vessel" & vessel_name == "ALBATUN DOS") %>% mutate(subsidy = format(subsidy_total_2020, big.mark =",")) %>% pull(subsidy)` euros in 2002 for its construction. Europe also financed the modernization of `r tuna_purse_seiners_subsidies %>% mutate(measure = ifelse(is.na(measure), sub_measure, measure)) %>% filter (country == "Spain" & measure %in% c("Modernisation of vessel", "1.4.4. Salud y seguridad (Art.32 (+ Art.44.1.b))", "1.5.3. Eficiencia y mitigación del cambio climatico. Inversiones a Bordo (Art.41.1.a (+ Art.44.1.d))")) %>% distinct(cfr) %>% nrow ()` Spanish tuna boats for a total of `r tuna_purse_seiners_subsidies %>% mutate(measure = ifelse(is.na(measure), sub_measure, measure)) %>% filter (country == "Spain" & measure %in% c("Modernisation of vessel", "1.4.4. Salud y seguridad (Art.32 (+ Art.44.1.b))", "1.5.3. Eficiencia y mitigación del cambio climatico. Inversiones a Bordo (Art.41.1.a (+ Art.44.1.d))")) %>% summarise (subsidy = format(sum(subsidy_total_2020), big.mark = ",")) %>% pull (subsidy)` euros.
+
+

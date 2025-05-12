@@ -47,3 +47,6 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
+
+# === DONNÉES SENSIBLES ET PRIVÉES ===
+data/subsidies/
